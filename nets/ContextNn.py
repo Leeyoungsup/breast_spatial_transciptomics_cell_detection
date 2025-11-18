@@ -226,41 +226,99 @@ class DFL(torch.nn.Module):
 
 
 class TissueContextEncoder(torch.nn.Module):
-    """Tissue context encoder for late fusion"""
-    def __init__(self, width, depth):
+    """
+    Tissue context encoder using ImageNet pre-trained classification backbone
+    
+    Supports multiple backbone architectures optimized for global tissue understanding
+    """
+    def __init__(self, context_dim=256, backbone='mobilenet_v3_small', pretrained=True):
+        """
+        Args:
+            context_dim: output dimension of context features
+            backbone: 'mobilenet_v3_small', 'mobilenet_v3_large', 'efficientnet_b0', 
+                     'efficientnet_b1', 'resnet18', 'resnet34'
+            pretrained: use ImageNet pre-trained weights (recommended for better tissue features)
+        """
         super().__init__()
-        # Separate encoder for tissue context image
-        self.p1 = Conv(width[0], width[1], torch.nn.SiLU(), k=3, s=2, p=1)
-        self.p2 = torch.nn.Sequential(
-            Conv(width[1], width[2], torch.nn.SiLU(), k=3, s=2, p=1),
-            CSP(width[2], width[3], depth[0], False, r=4)
-        )
-        self.p3 = torch.nn.Sequential(
-            Conv(width[3], width[3], torch.nn.SiLU(), k=3, s=2, p=1),
-            CSP(width[3], width[4], depth[1], False, r=4)
-        )
-        # Global context pooling
-        self.global_pool = torch.nn.AdaptiveAvgPool2d(1)
-        # Context feature projection
+        
+        try:
+            import torchvision.models as models
+        except ImportError:
+            raise ImportError("torchvision required. Install with: pip install torchvision")
+        
+        self.backbone_name = backbone
+        
+        # Select backbone and get feature dimension (optimized for 512x512 images)
+        if backbone == 'mobilenet_v3_small':
+            base_model = models.mobilenet_v3_small(weights='IMAGENET1K_V1' if pretrained else None)
+            feat_dim = 576
+            self.encoder = base_model.features
+            self.global_pool = torch.nn.AdaptiveAvgPool2d(1)
+        
+        elif backbone == 'mobilenet_v3_large':
+            base_model = models.mobilenet_v3_large(weights='IMAGENET1K_V2' if pretrained else None)
+            feat_dim = 960
+            self.encoder = base_model.features
+            self.global_pool = torch.nn.AdaptiveAvgPool2d(1)
+        
+        elif backbone == 'efficientnet_b0':
+            base_model = models.efficientnet_b0(weights='IMAGENET1K_V1' if pretrained else None)
+            feat_dim = 1280
+            self.encoder = base_model.features
+            self.global_pool = torch.nn.AdaptiveAvgPool2d(1)
+        
+        elif backbone == 'efficientnet_b1':
+            base_model = models.efficientnet_b1(weights='IMAGENET1K_V1' if pretrained else None)
+            feat_dim = 1280
+            self.encoder = base_model.features
+            self.global_pool = torch.nn.AdaptiveAvgPool2d(1)
+        
+        elif backbone == 'resnet18':
+            base_model = models.resnet18(weights='IMAGENET1K_V1' if pretrained else None)
+            feat_dim = 512
+            self.encoder = torch.nn.Sequential(*list(base_model.children())[:-1])  # Remove FC
+        
+        elif backbone == 'resnet34':
+            base_model = models.resnet34(weights='IMAGENET1K_V1' if pretrained else None)
+            feat_dim = 512
+            self.encoder = torch.nn.Sequential(*list(base_model.children())[:-1])
+        
+        else:
+            raise ValueError(f"Unsupported backbone: {backbone}. "
+                           f"Choose from: mobilenet_v3_small, mobilenet_v3_large, efficientnet_b0, "
+                           f"efficientnet_b1, resnet18, resnet34")
+        
+        # Context projection to desired dimension
         self.context_proj = torch.nn.Sequential(
-            torch.nn.Linear(width[4], width[4] // 2),
-            torch.nn.SiLU(),
-            torch.nn.Linear(width[4] // 2, width[4] // 2)
+            torch.nn.Linear(feat_dim, context_dim),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.Dropout(0.1),
+            torch.nn.Linear(context_dim, context_dim)
         )
+        
+        self.feat_dim = feat_dim
+        self.context_dim = context_dim
     
     def forward(self, x):
         """
         Args:
             x: tissue context image [B, 3, H, W]
         Returns:
-            context_features: [B, C]
+            context_features: [B, context_dim]
         """
-        x = self.p1(x)
-        x = self.p2(x)
-        x = self.p3(x)
-        # Global pooling to get context vector
-        x = self.global_pool(x).flatten(1)
+        # Extract features with backbone
+        x = self.encoder(x)
+        
+        # Global pooling (if not already done by backbone)
+        if hasattr(self, 'global_pool'):
+            x = self.global_pool(x)
+        
+        # Flatten
+        x = x.flatten(1)
+        
+        # Project to context dimension
         x = self.context_proj(x)
+        
         return x
 
 
@@ -368,7 +426,18 @@ class Head(torch.nn.Module):
 
 
 class YOLO(torch.nn.Module):
-    def __init__(self, width, depth, csp, num_classes, use_context=False):
+    def __init__(self, width, depth, csp, num_classes, use_context=False, 
+                 context_backbone='resnet18', context_dim=256, context_pretrained=True):
+        """
+        Args:
+            width, depth, csp: YOLO architecture parameters
+            num_classes: number of detection classes
+            use_context: whether to use tissue context encoder
+            context_backbone: backbone for context encoder ('resnet18', 'resnet34', 'resnet50', 
+                            'efficientnet_b0', 'mobilenet_v3_small')
+            context_dim: dimension of context features
+            context_pretrained: use ImageNet pretrained weights for context encoder
+        """
         super().__init__()
         self.use_context = use_context
         self.net = DarkNet(width, depth, csp)
@@ -376,8 +445,11 @@ class YOLO(torch.nn.Module):
         
         # Tissue context encoder (optional)
         if use_context:
-            self.context_encoder = TissueContextEncoder(width, depth)
-            context_dim = width[4] // 2  # From context_proj output
+            self.context_encoder = TissueContextEncoder(
+                context_dim=context_dim,
+                backbone=context_backbone,
+                pretrained=context_pretrained
+            )
         else:
             context_dim = 0
 
@@ -413,43 +485,64 @@ class YOLO(torch.nn.Module):
         return self
 
 
-def yolo_v11_n(num_classes: int = 80, use_context: bool = False):
+def yolo_v11_n(num_classes: int = 80, use_context: bool = False, 
+               context_backbone: str = 'mobilenet_v3_small', context_dim: int = 256):
+    """
+    YOLOv11-nano with optional tissue context (optimized for 512x512 images)
+    
+    Args:
+        num_classes: number of detection classes
+        use_context: enable tissue context encoder
+        context_backbone: 'mobilenet_v3_small' (default), 'mobilenet_v3_large', 
+                         'efficientnet_b0', 'efficientnet_b1', 'resnet18'
+        context_dim: dimension of context features (default: 256)
+    
+    Recommended backbones for 512x512:
+        - mobilenet_v3_small: Fast, lightweight (576 features)
+        - efficientnet_b0: Balanced accuracy/speed (1280 features)
+        - resnet18: Higher accuracy (512 features)
+    """
     csp = [False, True]
     depth = [1, 1, 1, 1, 1, 1]
     width = [3, 16, 32, 64, 128, 256]
-    return YOLO(width, depth, csp, num_classes, use_context)
+    return YOLO(width, depth, csp, num_classes, use_context, context_backbone, context_dim)
 
 
-def yolo_v11_t(num_classes: int = 80, use_context: bool = False):
+def yolo_v11_t(num_classes: int = 80, use_context: bool = False,
+               context_backbone: str = 'mobilenet_v3_small', context_dim: int = 256):
     csp = [False, True]
     depth = [1, 1, 1, 1, 1, 1]
     width = [3, 24, 48, 96, 192, 384]
-    return YOLO(width, depth, csp, num_classes, use_context)
+    return YOLO(width, depth, csp, num_classes, use_context, context_backbone, context_dim)
 
 
-def yolo_v11_s(num_classes: int = 80, use_context: bool = False):
+def yolo_v11_s(num_classes: int = 80, use_context: bool = False,
+               context_backbone: str = 'efficientnet_b0', context_dim: int = 256):
     csp = [False, True]
     depth = [1, 1, 1, 1, 1, 1]
     width = [3, 32, 64, 128, 256, 512]
-    return YOLO(width, depth, csp, num_classes, use_context)
+    return YOLO(width, depth, csp, num_classes, use_context, context_backbone, context_dim)
 
 
-def yolo_v11_m(num_classes: int = 80, use_context: bool = False):
+def yolo_v11_m(num_classes: int = 80, use_context: bool = False,
+               context_backbone: str = 'efficientnet_b1', context_dim: int = 384):
     csp = [True, True]
     depth = [1, 1, 1, 1, 1, 1]
     width = [3, 64, 128, 256, 512, 512]
-    return YOLO(width, depth, csp, num_classes, use_context)
+    return YOLO(width, depth, csp, num_classes, use_context, context_backbone, context_dim)
 
 
-def yolo_v11_l(num_classes: int = 80, use_context: bool = False):
+def yolo_v11_l(num_classes: int = 80, use_context: bool = False,
+               context_backbone: str = 'resnet34', context_dim: int = 512):
     csp = [True, True]
     depth = [2, 2, 2, 2, 2, 2]
     width = [3, 64, 128, 256, 512, 512]
-    return YOLO(width, depth, csp, num_classes, use_context)
+    return YOLO(width, depth, csp, num_classes, use_context, context_backbone, context_dim)
 
 
-def yolo_v11_x(num_classes: int = 80, use_context: bool = False):
+def yolo_v11_x(num_classes: int = 80, use_context: bool = False,
+               context_backbone: str = 'resnet34', context_dim: int = 512):
     csp = [True, True]
     depth = [2, 2, 2, 2, 2, 2]
     width = [3, 96, 192, 384, 768, 768]
-    return YOLO(width, depth, csp, num_classes, use_context)
+    return YOLO(width, depth, csp, num_classes, use_context, context_backbone, context_dim)
