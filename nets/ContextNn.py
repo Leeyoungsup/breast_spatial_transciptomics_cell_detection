@@ -225,17 +225,57 @@ class DFL(torch.nn.Module):
         return self.conv(x.softmax(1)).view(b, 4, a)
 
 
+class TissueContextEncoder(torch.nn.Module):
+    """Tissue context encoder for late fusion"""
+    def __init__(self, width, depth):
+        super().__init__()
+        # Separate encoder for tissue context image
+        self.p1 = Conv(width[0], width[1], torch.nn.SiLU(), k=3, s=2, p=1)
+        self.p2 = torch.nn.Sequential(
+            Conv(width[1], width[2], torch.nn.SiLU(), k=3, s=2, p=1),
+            CSP(width[2], width[3], depth[0], False, r=4)
+        )
+        self.p3 = torch.nn.Sequential(
+            Conv(width[3], width[3], torch.nn.SiLU(), k=3, s=2, p=1),
+            CSP(width[3], width[4], depth[1], False, r=4)
+        )
+        # Global context pooling
+        self.global_pool = torch.nn.AdaptiveAvgPool2d(1)
+        # Context feature projection
+        self.context_proj = torch.nn.Sequential(
+            torch.nn.Linear(width[4], width[4] // 2),
+            torch.nn.SiLU(),
+            torch.nn.Linear(width[4] // 2, width[4] // 2)
+        )
+    
+    def forward(self, x):
+        """
+        Args:
+            x: tissue context image [B, 3, H, W]
+        Returns:
+            context_features: [B, C]
+        """
+        x = self.p1(x)
+        x = self.p2(x)
+        x = self.p3(x)
+        # Global pooling to get context vector
+        x = self.global_pool(x).flatten(1)
+        x = self.context_proj(x)
+        return x
+
+
 class Head(torch.nn.Module):
     anchors = torch.empty(0)
     strides = torch.empty(0)
 
-    def __init__(self, nc=80, filters=()):
+    def __init__(self, nc=80, filters=(), use_context=False, context_dim=0):
         super().__init__()
         self.ch = 16  # DFL channels
         self.nc = nc  # number of classes
         self.nl = len(filters)  # number of detection layers
         self.no = nc + self.ch * 4  # number of outputs per anchor
         self.stride = torch.zeros(self.nl)  # strides computed during build
+        self.use_context = use_context
 
         box = max(64, filters[0] // 4)
         cls = max(80, filters[0], self.nc)
@@ -245,16 +285,64 @@ class Head(torch.nn.Module):
                                                            Conv(box, box,torch.nn.SiLU(), k=3, p=1),
                                                            torch.nn.Conv2d(box, out_channels=4 * self.ch,
                                                                            kernel_size=1)) for x in filters)
-        self.cls = torch.nn.ModuleList(torch.nn.Sequential(Conv(x, x, torch.nn.SiLU(), k=3, p=1, g=x),
-                                                           Conv(x, cls, torch.nn.SiLU()),
-                                                           Conv(cls, cls, torch.nn.SiLU(), k=3, p=1, g=cls),
-                                                           Conv(cls, cls, torch.nn.SiLU()),
-                                                           torch.nn.Conv2d(cls, out_channels=self.nc,
-                                                                           kernel_size=1)) for x in filters)
+        
+        # Classification branch with optional context fusion
+        if use_context:
+            # Late fusion: context features are fused at the classification stage
+            self.cls = torch.nn.ModuleList(torch.nn.Sequential(Conv(x, x, torch.nn.SiLU(), k=3, p=1, g=x),
+                                                               Conv(x, cls, torch.nn.SiLU()),
+                                                               Conv(cls, cls, torch.nn.SiLU(), k=3, p=1, g=cls),
+                                                               Conv(cls, cls, torch.nn.SiLU())) for x in filters)
+            
+            # Context fusion layers for each detection scale
+            self.context_fusion = torch.nn.ModuleList(
+                torch.nn.Sequential(
+                    torch.nn.Linear(context_dim, cls),
+                    torch.nn.SiLU(),
+                    torch.nn.Linear(cls, cls)
+                ) for _ in filters
+            )
+            
+            # Final classification layers after fusion
+            self.cls_final = torch.nn.ModuleList(
+                torch.nn.Conv2d(cls, out_channels=self.nc, kernel_size=1) for _ in filters
+            )
+        else:
+            self.cls = torch.nn.ModuleList(torch.nn.Sequential(Conv(x, x, torch.nn.SiLU(), k=3, p=1, g=x),
+                                                               Conv(x, cls, torch.nn.SiLU()),
+                                                               Conv(cls, cls, torch.nn.SiLU(), k=3, p=1, g=cls),
+                                                               Conv(cls, cls, torch.nn.SiLU()),
+                                                               torch.nn.Conv2d(cls, out_channels=self.nc,
+                                                                               kernel_size=1)) for x in filters)
 
-    def forward(self, x):
-        for i, (box, cls) in enumerate(zip(self.box, self.cls)):
-            x[i] = torch.cat(tensors=(box(x[i]), cls(x[i])), dim=1)
+    def forward(self, x, context_features=None):
+        """
+        Args:
+            x: list of feature maps from FPN
+            context_features: tissue context features [B, context_dim] (optional)
+        """
+        if self.use_context and context_features is not None:
+            # Late fusion with context
+            for i, (box, cls, ctx_fusion, cls_final) in enumerate(zip(self.box, self.cls, 
+                                                                        self.context_fusion, self.cls_final)):
+                box_out = box(x[i])
+                cls_feat = cls(x[i])  # [B, cls, H, W]
+                
+                # Fuse context features
+                b, c, h, w = cls_feat.shape
+                ctx_weight = ctx_fusion(context_features)  # [B, cls]
+                ctx_weight = ctx_weight.view(b, c, 1, 1).expand_as(cls_feat)  # [B, cls, H, W]
+                
+                # Element-wise multiplication for late fusion
+                cls_feat = cls_feat * (1 + ctx_weight)  # Modulate features with context
+                cls_out = cls_final(cls_feat)
+                
+                x[i] = torch.cat(tensors=(box_out, cls_out), dim=1)
+        else:
+            # Standard forward without context
+            for i, (box, cls) in enumerate(zip(self.box, self.cls)):
+                x[i] = torch.cat(tensors=(box(x[i]), cls(x[i])), dim=1)
+        
         if self.training:
             return x
 
@@ -280,21 +368,41 @@ class Head(torch.nn.Module):
 
 
 class YOLO(torch.nn.Module):
-    def __init__(self, width, depth, csp, num_classes):
+    def __init__(self, width, depth, csp, num_classes, use_context=False):
         super().__init__()
+        self.use_context = use_context
         self.net = DarkNet(width, depth, csp)
         self.fpn = DarkFPN(width, depth, csp)
+        
+        # Tissue context encoder (optional)
+        if use_context:
+            self.context_encoder = TissueContextEncoder(width, depth)
+            context_dim = width[4] // 2  # From context_proj output
+        else:
+            context_dim = 0
 
         img_dummy = torch.zeros(1, width[0], 256, 256)
-        self.head = Head(num_classes, (width[3], width[4], width[5]))
+        self.head = Head(num_classes, (width[3], width[4], width[5]), 
+                        use_context=use_context, context_dim=context_dim)
         self.head.stride = torch.tensor([256 / x.shape[-2] for x in self.forward(img_dummy)])
         self.stride = self.head.stride
         self.head.initialize_biases()
 
-    def forward(self, x):
+    def forward(self, x, tissue_context=None):
+        """
+        Args:
+            x: main input image [B, 3, H, W]
+            tissue_context: tissue context image [B, 3, H, W] (optional)
+        """
+        # Extract context features if provided
+        context_features = None
+        if self.use_context and tissue_context is not None:
+            context_features = self.context_encoder(tissue_context)
+        
+        # Main detection branch
         x = self.net(x)
         x = self.fpn(x)
-        return self.head(list(x))
+        return self.head(list(x), context_features)
 
     def fuse(self):
         for m in self.modules():
@@ -305,43 +413,43 @@ class YOLO(torch.nn.Module):
         return self
 
 
-def yolo_v11_n(num_classes: int = 80):
+def yolo_v11_n(num_classes: int = 80, use_context: bool = False):
     csp = [False, True]
     depth = [1, 1, 1, 1, 1, 1]
     width = [3, 16, 32, 64, 128, 256]
-    return YOLO(width, depth, csp, num_classes)
+    return YOLO(width, depth, csp, num_classes, use_context)
 
 
-def yolo_v11_t(num_classes: int = 80):
+def yolo_v11_t(num_classes: int = 80, use_context: bool = False):
     csp = [False, True]
     depth = [1, 1, 1, 1, 1, 1]
     width = [3, 24, 48, 96, 192, 384]
-    return YOLO(width, depth, csp, num_classes)
+    return YOLO(width, depth, csp, num_classes, use_context)
 
 
-def yolo_v11_s(num_classes: int = 80):
+def yolo_v11_s(num_classes: int = 80, use_context: bool = False):
     csp = [False, True]
     depth = [1, 1, 1, 1, 1, 1]
     width = [3, 32, 64, 128, 256, 512]
-    return YOLO(width, depth, csp, num_classes)
+    return YOLO(width, depth, csp, num_classes, use_context)
 
 
-def yolo_v11_m(num_classes: int = 80):
+def yolo_v11_m(num_classes: int = 80, use_context: bool = False):
     csp = [True, True]
     depth = [1, 1, 1, 1, 1, 1]
     width = [3, 64, 128, 256, 512, 512]
-    return YOLO(width, depth, csp, num_classes)
+    return YOLO(width, depth, csp, num_classes, use_context)
 
 
-def yolo_v11_l(num_classes: int = 80):
+def yolo_v11_l(num_classes: int = 80, use_context: bool = False):
     csp = [True, True]
     depth = [2, 2, 2, 2, 2, 2]
     width = [3, 64, 128, 256, 512, 512]
-    return YOLO(width, depth, csp, num_classes)
+    return YOLO(width, depth, csp, num_classes, use_context)
 
 
-def yolo_v11_x(num_classes: int = 80):
+def yolo_v11_x(num_classes: int = 80, use_context: bool = False):
     csp = [True, True]
     depth = [2, 2, 2, 2, 2, 2]
     width = [3, 96, 192, 384, 768, 768]
-    return YOLO(width, depth, csp, num_classes)
+    return YOLO(width, depth, csp, num_classes, use_context)
