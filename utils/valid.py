@@ -162,13 +162,13 @@ Best Macro F1: {max(val_macro_f1s):.4f} (Epoch {val_macro_f1s.index(max(val_macr
 
 
 def visualize_ground_truth_and_prediction_separately(model, dataset, idx=0, conf_threshold=0.5, iou_threshold=0.3, epoch=None, save_dir=None):
-    """실제 라벨과 예측 라벨을 subplot으로 좌우에 표시하는 함수"""
+    """실제 라벨과 예측 라벨을 subplot으로 좌우에 표시하는 함수 (tissue context 지원)"""
     if len(dataset) <= idx:
         print(f"경고: 데이터셋이 비어 있거나 idx {idx}가 데이터셋 크기({len(dataset)})보다 큽니다.")
         return
     
     model.eval()
-    img, cls, box, _ = dataset[idx]
+    img, tissue_img, cls, box, _ = dataset[idx]
     
     # 하나의 figure에 2개의 subplot 생성 (1행 2열)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
@@ -199,7 +199,7 @@ def visualize_ground_truth_and_prediction_separately(model, dataset, idx=0, conf
 
         ax1.scatter(center_x, center_y, facecolors='none',  s=20, marker='o', edgecolors=color, linewidths=1)
 
-    gt_title = f'Ground Truth '
+    gt_title = f'Ground Truth (Tissue Context)'
     if epoch is not None:
         gt_title += f' - Epoch {epoch}'
     ax1.set_title(gt_title, fontsize=16, fontweight='bold')
@@ -207,12 +207,13 @@ def visualize_ground_truth_and_prediction_separately(model, dataset, idx=0, conf
     
     # Subplot 2: Model Prediction (예측 라벨)
     ax2.imshow(img.permute(1, 2, 0).cpu().numpy())
-    
+    tissue_img= tissue_img.cpu() / 255.
     prediction_count = 0
     with torch.no_grad():
         img_input = img.unsqueeze(0).to(device)
+        tissue_input = tissue_img.unsqueeze(0).to(device)
         with torch.amp.autocast('cuda'):
-            pred = model(img_input)
+            pred = model(img_input, tissue_context=tissue_input)
 
         # NMS 적용
         results = util.non_max_suppression(pred, confidence_threshold=conf_threshold, iou_threshold=iou_threshold)
@@ -223,14 +224,32 @@ def visualize_ground_truth_and_prediction_separately(model, dataset, idx=0, conf
                 w_pred = x2 - x1
                 h_pred = y2 - y1
                 
-                if cls_id.item() == 0: #class_0
-                    color = 'green'
-                elif cls_id.item() == 1: #class_1+
-                    color = 'yellow'
-                elif cls_id.item() == 2: #Class_2+
-                    color = 'blue'
-                else: #Class_3+
-                    color = 'red'
+                if cls_id.item() == 0: #Tumor epithelial
+                    color = '#FF0000'
+                elif cls_id.item() == 1: #Non-tumor epithelial
+                    color = '#FFB6C1'
+                elif cls_id.item() == 2: #Basal/Myoepithelial
+                    color = '#FFA500'
+                elif cls_id.item() == 3: #Smooth muscle
+                    color = '#8B4513'
+                elif cls_id.item() == 4: #Fibroblast
+                    color = '#00FF00'
+                elif cls_id.item() == 5: #Endothelial
+                    color = '#0000FF'
+                elif cls_id.item() == 6: #T cell
+                    color = '#FFFF00'
+                elif cls_id.item() == 7: #B cell
+                    color = '#FF00FF'
+                elif cls_id.item() == 8: #Plasma cell
+                    color = '#9400D3'
+                elif cls_id.item() == 9: #Myeloid
+                    color = '#00FFFF'
+                elif cls_id.item() == 10: #Adipocyte
+                    color = '#FFC0CB'
+                else: #Other
+                    color = '#808080'
+                # 중심점 표시
+                
                 
                 center_x = (x1 + x2)//2
                 center_y = (y1 + y2)//2
@@ -254,14 +273,22 @@ def visualize_ground_truth_and_prediction_separately(model, dataset, idx=0, conf
         fig.suptitle(f'Validation Comparison - Epoch {epoch}, Sample {idx+1}', 
                      fontsize=18, fontweight='bold', y=0.95)
     
-    # 범례 추가
+    # 범례 추가 (12개 클래스)
     legend_elements = [
-        patches.Patch(color='green', label='Class_0'),
-        patches.Patch(color='yellow', label='Class_1+'),
-        patches.Patch(color='blue', label='Class_2+'),
-        patches.Patch(color='red', label='Class_3+'),
+        patches.Patch(color='#FF0000', label='0:Tumor epi'),
+        patches.Patch(color='#FFB6C1', label='1:Non-tumor epi'),
+        patches.Patch(color='#FFA500', label='2:Basal/Myo'),
+        patches.Patch(color='#8B4513', label='3:Smooth muscle'),
+        patches.Patch(color='#00FF00', label='4:Fibroblast'),
+        patches.Patch(color='#0000FF', label='5:Endothelial'),
+        patches.Patch(color='#FFFF00', label='6:T cell'),
+        patches.Patch(color='#FF00FF', label='7:B cell'),
+        patches.Patch(color='#9400D3', label='8:Plasma cell'),
+        patches.Patch(color='#00FFFF', label='9:Myeloid'),
+        patches.Patch(color='#FFC0CB', label='10:Adipocyte'),
+        patches.Patch(color='#808080', label='11:Other'),
     ]
-    fig.legend(handles=legend_elements, loc='lower center', ncol=3, 
+    fig.legend(handles=legend_elements, loc='lower center', ncol=6, 
                bbox_to_anchor=(0.5, 0.02), fontsize=12)
     
     # 레이아웃 조정
@@ -613,13 +640,13 @@ def compute_distance_matrix(centers1, centers2):
 
 def compute_point_label_metrics(model, val_loader, device, params, distance_threshold=16):
     """
-    Point-label에 최적화된 검증 메트릭 계산
+    Point-label에 최적화된 검증 메트릭 계산 (tissue context 지원)
     - Distance-based matching (IoU 대신 중심점 거리 사용)
     - Detection recall: GT 세포를 얼마나 찾았는가
     - Classification accuracy: 찾은 세포의 클래스를 얼마나 정확하게 분류했는가
     
     Args:
-        model: YOLO 모델
+        model: YOLO 모델 (tissue context 지원)
         val_loader: 검증 데이터로더
         device: 디바이스
         params: 파라미터 (클래스 이름 등)
@@ -649,20 +676,21 @@ def compute_point_label_metrics(model, val_loader, device, params, distance_thre
     total_matched = 0
     total_correct_class = 0
     
-    # 클래스별 통계 (4개 클래스: 0, 1+, 2+, 3+)
-    num_classes = 4
+    # 클래스별 통계 (12개 클래스)
+    num_classes = 12
     class_tp = np.zeros(num_classes)  # True Positive (올바르게 탐지+분류)
     class_fp = np.zeros(num_classes)  # False Positive (잘못 탐지 또는 잘못 분류)
     class_fn = np.zeros(num_classes)  # False Negative (탐지 실패)
     class_gt_count = np.zeros(num_classes)  # GT 개수
     
     with torch.no_grad():
-        for batch_idx, (images, targets) in enumerate(val_loader):
+        for batch_idx, (images, tissue_images, targets) in enumerate(val_loader):
             images = images.to(device).float() / 255
+            tissue_images = tissue_images.to(device).float() / 255
             
-            # 예측
+            # 예측 (tissue context 포함)
             with torch.amp.autocast('cuda'):
-                pred = model(images)
+                pred = model(images, tissue_context=tissue_images)
             
             # NMS 적용
             results = util.non_max_suppression(pred, confidence_threshold=0.25, iou_threshold=0.45)
