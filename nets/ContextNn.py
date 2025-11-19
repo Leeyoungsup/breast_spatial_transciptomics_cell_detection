@@ -419,10 +419,17 @@ class Head(torch.nn.Module):
         # Initialize biases
         # WARNING: requires stride availability
         for box, cls, s in zip(self.box, self.cls, self.stride):
-            # box
-            box[-1].bias.data[:] = 1.0
+            # box - Conv 모듈의 conv 서브모듈에 bias가 있음
+            if hasattr(box[-1], 'bias') and box[-1].bias is not None:
+                box[-1].bias.data[:] = 1.0
+            elif hasattr(box[-1], 'conv') and hasattr(box[-1].conv, 'bias') and box[-1].conv.bias is not None:
+                box[-1].conv.bias.data[:] = 1.0
+            
             # cls (.01 objects, 80 classes, 640 image)
-            cls[-1].bias.data[:self.nc] = math.log(5 / self.nc / (640 / s) ** 2)
+            if hasattr(cls[-1], 'bias') and cls[-1].bias is not None:
+                cls[-1].bias.data[:self.nc] = math.log(5 / self.nc / (640 / s) ** 2)
+            elif hasattr(cls[-1], 'conv') and hasattr(cls[-1].conv, 'bias') and cls[-1].conv.bias is not None:
+                cls[-1].conv.bias.data[:self.nc] = math.log(5 / self.nc / (640 / s) ** 2)
 
 
 class YOLO(torch.nn.Module):
