@@ -177,21 +177,37 @@ def visualize_ground_truth_and_prediction_separately(model, dataset, idx=0, conf
     ax1.imshow(img.permute(1, 2, 0).cpu().numpy())
     
     for i in range(len(cls)):
-        class_id = cls[i].item()
+        class_id = int(cls[i].item())
         x_center, y_center, w, h = box[i].tolist()
         
         x = (x_center - w/2) * img.shape[2]
         y = (y_center - h/2) * img.shape[1]
         w_box = w * img.shape[2]
         h_box = h * img.shape[1]
-        if class_id == 0: #class_0
-            color = 'green'
-        elif class_id == 1: #class_1+
-            color = 'yellow'
-        elif class_id == 2: #Class_2+
-            color = 'blue'
-        else: #Class_3+
-            color = 'red'
+        if class_id == 0: #Tumor epithelial
+            color = '#FF0000'
+        elif class_id == 1: #Non-tumor epithelial
+            color = '#FFB6C1'
+        elif class_id == 2: #Basal/Myoepithelial
+            color = '#FFA500'
+        elif class_id == 3: #Smooth muscle
+            color = '#8B4513'
+        elif class_id == 4: #Fibroblast
+            color = '#00FF00'
+        elif class_id == 5: #Endothelial
+            color = '#0000FF'
+        elif class_id == 6: #T cell
+            color = '#FFFF00'
+        elif class_id == 7: #B cell
+            color = '#FF00FF'
+        elif class_id == 8: #Plasma cell
+            color = '#9400D3'
+        elif class_id == 9: #Myeloid
+            color = '#00FFFF'
+        elif class_id == 10: #Adipocyte
+            color = '#FFC0CB'
+        else: #Other
+            color = '#808080'
         # 중심점 표시
         # 중심점 좌표 계산
         center_x = int(x + w_box / 2)
