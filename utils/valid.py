@@ -157,8 +157,8 @@ Best Macro F1: {max(val_macro_f1s):.4f} (Epoch {val_macro_f1s.index(max(val_macr
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     print(f"📈 학습 진행 그래프 저장: {save_path}")
     
-    plt.show()
-    plt.close()
+    # plt.show()
+    # plt.close()
 
 
 def visualize_ground_truth_and_prediction_separately(model, dataset, idx=0, conf_threshold=0.5, iou_threshold=0.3, epoch=None, save_dir=None):
