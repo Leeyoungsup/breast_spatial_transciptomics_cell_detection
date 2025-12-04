@@ -175,7 +175,29 @@ def visualize_ground_truth_and_prediction_separately(model, dataset, idx=0, conf
     img = img.cpu() / 255.
     # Subplot 1: Ground Truth (실제 라벨)
     ax1.imshow(img.permute(1, 2, 0).cpu().numpy())
-    
+    class_names = {
+    0: "epithelial",
+    1: "Basal/Myoepithelial",
+    2: "Smooth muscle",
+    3: "Fibroblast",
+    4: "Endothelial",
+    5: "Lymphocyte",                # T + B 통합
+    6: "Plasma cell",
+    7: "Macrophage/Histiocyte",     # 통합
+    8: "Neutrophil",
+    9: "Adipocyte",
+    10: "Other/Unknown"
+}
+    colors = ["#FF0000","#FFA500",
+    "#8B4513",
+    "#00FF00",
+    "#0000FF",
+    "#FFFF00",
+    "#FF00FF",
+    "#9400D3",
+    "#00FFFF",
+    "#FF6060",
+    "#808080"]
     for i in range(len(cls)):
         class_id = int(cls[i].item())
         x_center, y_center, w, h = box[i].tolist()
@@ -184,30 +206,7 @@ def visualize_ground_truth_and_prediction_separately(model, dataset, idx=0, conf
         y = (y_center - h/2) * img.shape[1]
         w_box = w * img.shape[2]
         h_box = h * img.shape[1]
-        if class_id == 0: #Tumor epithelial
-            color = '#FF0000'
-        elif class_id == 1: #Non-tumor epithelial
-            color = '#FFB6C1'
-        elif class_id == 2: #Basal/Myoepithelial
-            color = '#FFA500'
-        elif class_id == 3: #Smooth muscle
-            color = '#8B4513'
-        elif class_id == 4: #Fibroblast
-            color = '#00FF00'
-        elif class_id == 5: #Endothelial
-            color = '#0000FF'
-        elif class_id == 6: #T cell
-            color = '#FFFF00'
-        elif class_id == 7: #B cell
-            color = '#FF00FF'
-        elif class_id == 8: #Plasma cell
-            color = '#9400D3'
-        elif class_id == 9: #Myeloid
-            color = '#00FFFF'
-        elif class_id == 10: #Adipocyte
-            color = '#FFC0CB'
-        else: #Other
-            color = '#808080'
+        color=colors[class_id]
         # 중심점 표시
         # 중심점 좌표 계산
         center_x = int(x + w_box / 2)
@@ -240,33 +239,8 @@ def visualize_ground_truth_and_prediction_separately(model, dataset, idx=0, conf
                 w_pred = x2 - x1
                 h_pred = y2 - y1
                 
-                if cls_id.item() == 0: #Tumor epithelial
-                    color = '#FF0000'
-                elif cls_id.item() == 1: #Non-tumor epithelial
-                    color = '#FFB6C1'
-                elif cls_id.item() == 2: #Basal/Myoepithelial
-                    color = '#FFA500'
-                elif cls_id.item() == 3: #Smooth muscle
-                    color = '#8B4513'
-                elif cls_id.item() == 4: #Fibroblast
-                    color = '#00FF00'
-                elif cls_id.item() == 5: #Endothelial
-                    color = '#0000FF'
-                elif cls_id.item() == 6: #T cell
-                    color = '#FFFF00'
-                elif cls_id.item() == 7: #B cell
-                    color = '#FF00FF'
-                elif cls_id.item() == 8: #Plasma cell
-                    color = '#9400D3'
-                elif cls_id.item() == 9: #Myeloid
-                    color = '#00FFFF'
-                elif cls_id.item() == 10: #Adipocyte
-                    color = '#FFC0CB'
-                else: #Other
-                    color = '#808080'
-                # 중심점 표시
                 
-                
+                color = colors[int(cls_id.item())]
                 center_x = (x1 + x2)//2
                 center_y = (y1 + y2)//2
                 ax2.scatter(center_x, center_y, facecolors='none',  s=20, marker='o', edgecolors=color, linewidths=1)
@@ -291,18 +265,7 @@ def visualize_ground_truth_and_prediction_separately(model, dataset, idx=0, conf
     
     # 범례 추가 (12개 클래스)
     legend_elements = [
-        patches.Patch(color='#FF0000', label='0:Tumor epi'),
-        patches.Patch(color='#FFB6C1', label='1:Non-tumor epi'),
-        patches.Patch(color='#FFA500', label='2:Basal/Myo'),
-        patches.Patch(color='#8B4513', label='3:Smooth muscle'),
-        patches.Patch(color='#00FF00', label='4:Fibroblast'),
-        patches.Patch(color='#0000FF', label='5:Endothelial'),
-        patches.Patch(color='#FFFF00', label='6:T cell'),
-        patches.Patch(color='#FF00FF', label='7:B cell'),
-        patches.Patch(color='#9400D3', label='8:Plasma cell'),
-        patches.Patch(color='#00FFFF', label='9:Myeloid'),
-        patches.Patch(color='#FFC0CB', label='10:Adipocyte'),
-        patches.Patch(color='#808080', label='11:Other'),
+        patches.Patch(color=colors[i], label=class_names[i]) for i in range(len(colors))
     ]
     fig.legend(handles=legend_elements, loc='lower center', ncol=6, 
                bbox_to_anchor=(0.5, 0.02), fontsize=12)
